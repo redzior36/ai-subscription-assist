@@ -110,13 +110,21 @@
           "title": "Add ChatGPT AI Task",
           "data": {
             "name": "Name",
-            "chat_model": "Model"
+            "chat_model": "Model",
+            "codex_image_generation": "Image generation (experimental)"
+          },
+          "data_description": {
+            "codex_image_generation": "Use the Codex image service with your ChatGPT sign-in. Availability depends on the account and server."
           }
         },
         "reconfigure": {
           "title": "Reconfigure ChatGPT AI Task",
           "data": {
-            "chat_model": "Model"
+            "chat_model": "Model",
+            "codex_image_generation": "Image generation (experimental)"
+          },
+          "data_description": {
+            "codex_image_generation": "Use the Codex image service with your ChatGPT sign-in. Availability depends on the account and server."
           }
         }
       }

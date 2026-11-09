@@ -123,6 +123,25 @@ with models that accept images. Image attachments are sent to OpenAI, with a
 combined limit of 10 MiB per message. For field definitions and more examples,
 see the [Home Assistant AI Task documentation](https://www.home-assistant.io/integrations/ai_task/).
 
+#### Image generation and Decisions
+
+To use **AI Task → Generate image** with the same ChatGPT sign-in, open
+**Reconfigure AI Task** on the existing ChatGPT AI Task entry and enable
+**Image generation (experimental)**. Select that entity as the preferred
+provider for image generation or pass it to `ai_task.generate_image`.
+With an image attachment, the action can edit the supplied image.
+
+Image generation uses the native Codex image endpoint. The endpoint is
+unpublished for third-party integrations and availability depends on the
+account and environment. The AI Task text model setting applies to
+**Generate data**. The image endpoint selects the image model.
+
+For **Decisions**, Home Assistant's
+[built-in OpenAI integration](https://www.home-assistant.io/integrations/openai_conversation/)
+provides **Add AI task evaluation** with an OpenAI API key. It uses the
+[OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions).
+The ChatGPT OAuth entity provides Generate data and optional Generate image.
+
 ### Speech-to-text (`stt.claude_speech_to_text`)
 
 A Home Assistant speech-to-text entity backed by the same transcription service

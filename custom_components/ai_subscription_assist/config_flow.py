@@ -52,6 +52,7 @@ from . import _create_client, _extract_openai_codex_account_id, _openai_token_ex
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_CHAT_MODEL,
+    CONF_CODEX_IMAGE_GENERATION,
     CONF_ENABLED_TOOLS,
     CONF_EXPIRES_AT,
     CONF_GOOGLE_PROJECT_ID,
@@ -1032,14 +1033,19 @@ class CodexAITaskSubentryFlow(ConfigSubentryFlow):
         if user_input is not None:
             return self.async_create_entry(
                 title=user_input[CONF_NAME],
-                data={CONF_CHAT_MODEL: user_input[CONF_CHAT_MODEL]},
+                data={
+                    CONF_CHAT_MODEL: user_input[CONF_CHAT_MODEL],
+                    CONF_CODEX_IMAGE_GENERATION: user_input.get(
+                        CONF_CODEX_IMAGE_GENERATION, False
+                    ),
+                },
             )
-        return self._show_task_form("user", DEFAULT_OPENAI_CODEX_MODEL)
+        return self._show_task_form("user", DEFAULT_OPENAI_CODEX_MODEL, False)
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Change the model used for tasks."""
+        """Change the model and capabilities used for tasks."""
         entry = self._get_entry()
         if entry.state != ConfigEntryState.LOADED:
             return self.async_abort(reason="entry_not_loaded")
@@ -1049,18 +1055,22 @@ class CodexAITaskSubentryFlow(ConfigSubentryFlow):
                 entry, subentry, data={**subentry.data, **user_input}
             )
         return self._show_task_form(
-            "reconfigure", subentry.data.get(CONF_CHAT_MODEL, DEFAULT_OPENAI_CODEX_MODEL)
+            "reconfigure",
+            subentry.data.get(CONF_CHAT_MODEL, DEFAULT_OPENAI_CODEX_MODEL),
+            subentry.data.get(CONF_CODEX_IMAGE_GENERATION, False),
         )
 
-    def _show_task_form(self, step_id: str, model: str) -> SubentryFlowResult:
+    def _show_task_form(
+        self, step_id: str, model: str, image_generation: bool
+    ) -> SubentryFlowResult:
         schema: VolDictType = {}
         if step_id == "user":
             schema[vol.Required(CONF_NAME, default="ChatGPT AI Task")] = str
         schema[vol.Required(CONF_CHAT_MODEL, default=model)] = SelectSelector(
             SelectSelectorConfig(options=_codex_model_options(), custom_value=True)
         )
+        schema[vol.Optional(CONF_CODEX_IMAGE_GENERATION, default=image_generation)] = bool
         return self.async_show_form(step_id=step_id, data_schema=vol.Schema(schema))
-
 
 
 class AiSubscriptionAssistOptionsFlow(OptionsFlow):
