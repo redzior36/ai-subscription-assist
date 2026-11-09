@@ -57,6 +57,7 @@ from .memory_websocket import async_setup_memory_websocket_api
 from .panel import async_setup_memory_panel
 
 PLATFORMS = (Platform.CONVERSATION, Platform.STT)
+CODEX_PLATFORMS = (*PLATFORMS, Platform.AI_TASK)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 @dataclass(slots=True)
@@ -648,7 +649,8 @@ async def async_setup_entry(
     unregister_apis = async_register_ai_subscription_assist_apis(hass, entry)
     entry.async_on_unload(unregister_apis)
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    platforms = CODEX_PLATFORMS if provider == PROVIDER_OPENAI_CODEX else PLATFORMS
+    await hass.config_entries.async_forward_entry_setups(entry, platforms)
 
     entry.async_on_unload(entry.add_update_listener(async_update_options))
 
@@ -657,7 +659,9 @@ async def async_setup_entry(
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload AI Subscription Assist."""
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    provider = entry.data.get(CONF_PROVIDER)
+    platforms = CODEX_PLATFORMS if provider == PROVIDER_OPENAI_CODEX else PLATFORMS
+    unloaded = await hass.config_entries.async_unload_platforms(entry, platforms)
     async_remove_memory_service_for_entry(hass, entry.entry_id)
     return unloaded
 

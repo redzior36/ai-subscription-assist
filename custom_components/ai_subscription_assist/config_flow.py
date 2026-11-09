@@ -112,6 +112,7 @@ from .const import (
     PROVIDER_CLAUDE_OAUTH,
     PROVIDER_OPENAI,
     PROVIDER_OPENAI_CODEX,
+    SUBENTRY_AI_TASK,
     PROVIDER_GOOGLE_GEMINI_CLI,
     WEB_SEARCH_UNSUPPORTED_MODELS,
     MEMORY_DEFAULTS,
@@ -132,6 +133,23 @@ DEFAULT_CONVERSATION_OPTIONS = {
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
     CONF_YOLO_MODE: False,
 }
+
+
+def _codex_model_options() -> list[SelectOptionDict]:
+    """Return the model choices shared by Codex conversation and AI Task."""
+    return [
+        SelectOptionDict(label="GPT-6.1 Sol", value="gpt-6.1-sol"),
+        SelectOptionDict(label="GPT-6.1 Terra", value="gpt-6.1-terra"),
+        SelectOptionDict(label="GPT-6 Luna", value="gpt-6-luna"),
+        SelectOptionDict(label="GPT-6 Astra", value="gpt-6-astra"),
+        SelectOptionDict(label="GPT-5.3 Codex", value="gpt-5.3-codex"),
+        SelectOptionDict(label="GPT-5.2 Codex", value="gpt-5.2-codex"),
+        SelectOptionDict(label="GPT-5.1 Codex Max", value="gpt-5.1-codex-max"),
+        SelectOptionDict(label="GPT-5.1 Codex Mini", value="gpt-5.1-codex-mini"),
+        SelectOptionDict(label="GPT-5.3 Codex Spark", value="gpt-5.3-codex-spark"),
+        SelectOptionDict(label="GPT-5.2", value="gpt-5.2"),
+        SelectOptionDict(label="GPT-5.1", value="gpt-5.1"),
+    ]
 
 
 def _default_conversation_options(provider: str) -> dict[str, Any]:
@@ -994,9 +1012,55 @@ class AiSubscriptionAssistConfigFlow(ConfigFlow, domain=DOMAIN):
         cls, config_entry: ConfigEntry
     ) -> dict[str, type[ConfigSubentryFlow]]:
         """Return subentries supported by this integration."""
-        return {
+        subentry_types: dict[str, type[ConfigSubentryFlow]] = {
             "conversation": ConversationSubentryFlowHandler,
         }
+        if config_entry.data.get(CONF_PROVIDER) == PROVIDER_OPENAI_CODEX:
+            subentry_types[SUBENTRY_AI_TASK] = CodexAITaskSubentryFlow
+        return subentry_types
+
+
+class CodexAITaskSubentryFlow(ConfigSubentryFlow):
+    """Add or configure a ChatGPT AI Task entity."""
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Create an AI Task subentry."""
+        if self._get_entry().state != ConfigEntryState.LOADED:
+            return self.async_abort(reason="entry_not_loaded")
+        if user_input is not None:
+            return self.async_create_entry(
+                title=user_input[CONF_NAME],
+                data={CONF_CHAT_MODEL: user_input[CONF_CHAT_MODEL]},
+            )
+        return self._show_task_form("user", DEFAULT_OPENAI_CODEX_MODEL)
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Change the model used for tasks."""
+        entry = self._get_entry()
+        if entry.state != ConfigEntryState.LOADED:
+            return self.async_abort(reason="entry_not_loaded")
+        subentry = self._get_reconfigure_subentry()
+        if user_input is not None:
+            return self.async_update_and_abort(
+                entry, subentry, data={**subentry.data, **user_input}
+            )
+        return self._show_task_form(
+            "reconfigure", subentry.data.get(CONF_CHAT_MODEL, DEFAULT_OPENAI_CODEX_MODEL)
+        )
+
+    def _show_task_form(self, step_id: str, model: str) -> SubentryFlowResult:
+        schema: VolDictType = {}
+        if step_id == "user":
+            schema[vol.Required(CONF_NAME, default="ChatGPT AI Task")] = str
+        schema[vol.Required(CONF_CHAT_MODEL, default=model)] = SelectSelector(
+            SelectSelectorConfig(options=_codex_model_options(), custom_value=True)
+        )
+        return self.async_show_form(step_id=step_id, data_schema=vol.Schema(schema))
+
 
 
 class AiSubscriptionAssistOptionsFlow(OptionsFlow):
@@ -1457,19 +1521,7 @@ class ConversationSubentryFlowHandler(ConfigSubentryFlow):
         provider = self._get_provider()
 
         if provider == PROVIDER_OPENAI_CODEX:
-            return [
-                SelectOptionDict(label="GPT-6.1 Sol", value="gpt-6.1-sol"),
-                SelectOptionDict(label="GPT-6.1 Terra", value="gpt-6.1-terra"),
-                SelectOptionDict(label="GPT-6 Luna", value="gpt-6-luna"),
-                SelectOptionDict(label="GPT-6 Astra", value="gpt-6-astra"),
-                SelectOptionDict(label="GPT-5.3 Codex", value="gpt-5.3-codex"),
-                SelectOptionDict(label="GPT-5.2 Codex", value="gpt-5.2-codex"),
-                SelectOptionDict(label="GPT-5.1 Codex Max", value="gpt-5.1-codex-max"),
-                SelectOptionDict(label="GPT-5.1 Codex Mini", value="gpt-5.1-codex-mini"),
-                SelectOptionDict(label="GPT-5.3 Codex Spark", value="gpt-5.3-codex-spark"),
-                SelectOptionDict(label="GPT-5.2", value="gpt-5.2"),
-                SelectOptionDict(label="GPT-5.1", value="gpt-5.1"),
-            ]
+            return _codex_model_options()
 
         if provider == PROVIDER_GOOGLE_GEMINI_CLI:
             return [

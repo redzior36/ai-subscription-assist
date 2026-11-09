@@ -454,8 +454,38 @@ def _convert_content_openai(
     return messages
 
 
-def _convert_content_openai_codex(
-    chat_content: Iterable[conversation.Content],
+def _codex_image_parts(
+    attachments: list[conversation.Attachment],
+) -> list[dict[str, str]]:
+    """Read Home Assistant's resolved attachments as inline Codex images."""
+    remaining_bytes = 10 * 1024 * 1024
+    parts: list[dict[str, str]] = []
+    for attachment in attachments:
+        mime_type = attachment.mime_type or guess_file_type(attachment.path)[0] or ""
+        mime_type = mime_type.partition(";")[0].strip().lower()
+        if mime_type == "image/jpg":
+            mime_type = "image/jpeg"
+        if mime_type not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
+            raise HomeAssistantError("ChatGPT accepts JPEG, PNG, WebP, and GIF attachments")
+        try:
+            with attachment.path.open("rb") as file:
+                image = file.read(remaining_bytes + 1)
+        except OSError as err:
+            raise HomeAssistantError("Could not read the image for ChatGPT") from err
+        remaining_bytes -= len(image)
+        if not image or remaining_bytes < 0:
+            raise HomeAssistantError(
+                "ChatGPT image attachments must be nonempty and total at most 10 MiB"
+            )
+        encoded = base64.b64encode(image).decode("ascii")
+        parts.append(
+            {"type": "input_image", "image_url": f"data:{mime_type};base64,{encoded}"}
+        )
+    return parts
+
+
+async def _async_convert_content_openai_codex(
+    hass: HomeAssistant, chat_content: Iterable[conversation.Content]
 ) -> list[dict[str, Any]]:
     """Transform HA chat_log content into OpenAI Responses API input format."""
     messages: list[dict[str, Any]] = []
@@ -466,21 +496,12 @@ def _convert_content_openai_codex(
             continue
 
         if isinstance(content, conversation.UserContent):
+            parts = [{"type": "input_text", "text": content.content}]
             if content.attachments:
-                raise HomeAssistantError(
-                    "Attachments are not supported by the OpenAI Codex backend"
+                parts.extend(
+                    await hass.async_add_executor_job(_codex_image_parts, content.attachments)
                 )
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": content.content,
-                        }
-                    ],
-                }
-            )
+            messages.append({"role": "user", "content": parts})
             continue
 
         if isinstance(content, conversation.AssistantContent):
@@ -1052,7 +1073,7 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
 
         output_tool: str | None = None
         instructions = system.content or "You are a Home Assistant voice assistant."
-        if structure and structure_name:
+        if structure is not None and structure_name:
             output_tool = slugify(structure_name)
             tools.append(
                 {
@@ -1090,7 +1111,9 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
         }
 
         for _iteration in range(MAX_TOOL_ITERATIONS):
-            input_messages = _convert_content_openai_codex(chat_log.content[1:])
+            input_messages = await _async_convert_content_openai_codex(
+                self.hass, chat_log.content[1:]
+            )
 
             payload: dict[str, Any] = {
                 "model": model,
@@ -1119,6 +1142,7 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
                 raise HomeAssistantError("OpenAI Codex response output was invalid")
 
             assistant_parts: list[str] = []
+            structured_text: str | None = None
             tool_inputs: list[llm.ToolInput] = []
 
             for item in output_items:
@@ -1143,10 +1167,11 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
                         continue
                     arguments_raw = item.get("arguments") or ""
                     if output_tool and name == output_tool:
-                        if isinstance(arguments_raw, str):
-                            assistant_parts.append(arguments_raw)
-                        elif isinstance(arguments_raw, dict):
-                            assistant_parts.append(json_dumps(arguments_raw))
+                        if structured_text is not None:
+                            raise HomeAssistantError("ChatGPT returned more than one structured result")
+                        structured_text = (
+                            arguments_raw if isinstance(arguments_raw, str) else json_dumps(arguments_raw)
+                        )
                         continue
 
                     call_id = item.get("call_id")
@@ -1178,6 +1203,10 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
                     )
 
             assistant_text = "".join(assistant_parts) or None
+            if output_tool and not tool_inputs:
+                if not structured_text:
+                    raise HomeAssistantError("ChatGPT did not return the requested structured result")
+                assistant_text = structured_text
             if not assistant_text and not tool_inputs:
                 raise HomeAssistantError("OpenAI Codex completed without text or tool calls")
 

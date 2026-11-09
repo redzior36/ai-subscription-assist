@@ -98,6 +98,31 @@ conversation only. For an Assist pipeline without an OpenAI API key, pair
 the ChatGPT agent with [Whisper and Piper](https://www.home-assistant.io/voice_control/voice_remote_local_assistant/).
 For cloud TTS, configure the [built-in OpenAI integration](https://www.home-assistant.io/integrations/openai_conversation/).
 
+### ChatGPT as an AI Task provider
+
+Open **Settings → Devices & services → AI Subscription Assist** and select
+**Add AI Task** under an existing **ChatGPT (Codex)** entry. Give the task a
+name and select its model. It uses the existing ChatGPT sign-in.
+
+In **Developer tools → Actions**, try **AI Task: Generate data** with the
+new entity. You can also use it in scripts and automations.
+
+```yaml
+action: ai_task.generate_data
+data:
+  entity_id: ai_task.chatgpt_ai_task
+  task_name: greeting
+  instructions: "Przywitaj się po polsku w jednym zdaniu."
+response_variable: greeting
+```
+
+Replace the example entity ID with the one Home Assistant assigned. Use
+`greeting.data` to read the result in a script or automation. The entity
+supports text, structured results and image inputs, such as camera snapshots,
+with models that accept images. Image attachments are sent to OpenAI, with a
+combined limit of 10 MiB per message. For field definitions and more examples,
+see the [Home Assistant AI Task documentation](https://www.home-assistant.io/integrations/ai_task/).
+
 ### Speech-to-text (`stt.claude_speech_to_text`)
 
 A Home Assistant speech-to-text entity backed by the same transcription service

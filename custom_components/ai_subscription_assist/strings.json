@@ -95,6 +95,32 @@
     }
   },
   "config_subentries": {
+    "ai_task_data": {
+      "abort": {
+        "entry_not_loaded": "The ChatGPT configuration must be loaded to manage AI tasks.",
+        "reconfigure_successful": "AI Task settings updated."
+      },
+      "entry_type": "AI Task",
+      "initiate_flow": {
+        "user": "Add AI Task",
+        "reconfigure": "Reconfigure AI Task"
+      },
+      "step": {
+        "user": {
+          "title": "Add ChatGPT AI Task",
+          "data": {
+            "name": "Name",
+            "chat_model": "Model"
+          }
+        },
+        "reconfigure": {
+          "title": "Reconfigure ChatGPT AI Task",
+          "data": {
+            "chat_model": "Model"
+          }
+        }
+      }
+    },
     "conversation": {
       "abort": {
         "entry_not_loaded": "Cannot add things while the configuration is disabled.",

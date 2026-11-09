@@ -122,6 +122,7 @@ def test_codex_conversation_replays_tool_result(tmp_path):
                 SimpleNamespace(runtime_data=client, data={}),
                 SimpleNamespace(data={}, subentry_id="test", title="Codex"),
             )
+            agent.hass = hass
             agent.entity_id = "conversation.test_codex"
             chat_log = conversation.ChatLog(
                 hass,
