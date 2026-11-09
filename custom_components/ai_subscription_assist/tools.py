@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -13,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers import llm
 
-from .const import CONF_CHAT_MODEL, CONF_YOLO_MODE, LOGGER
+from .const import CONF_CHAT_MODEL, CONF_YOLO_MODE, DOMAIN, LOGGER
 from .dashboard_safety import validate_view_change_request
 from .internet_lookup import (
     collapse_whitespace,
@@ -57,6 +58,8 @@ def _validate_exposed_entities(
 class AiSubscriptionAssistTool(llm.Tool):
     """Base class for custom tools with yolo helpers."""
 
+    integration = DOMAIN
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -66,6 +69,17 @@ class AiSubscriptionAssistTool(llm.Tool):
         self._hass = hass
         self._entry = entry
         self._subentry_id = subentry_id
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
+    ) -> llm.ToolResult | dict[str, Any]:
+        """Validate custom tool inputs before Home Assistant actions are executed."""
+        # Core 2026.11 delegates parameter validation to each tool.
+        if hasattr(llm, "ToolResult"):
+            tool_input = replace(tool_input, tool_args=self.parameters(tool_input.tool_args))
+            result = await self._async_call(hass, tool_input, llm_context)
+            return llm.ToolResult(data=result, error="error" in result)
+        return await self._async_call(hass, tool_input, llm_context)
 
     def _is_yolo_mode(self) -> bool:
         return _is_yolo_mode(self._entry, self._subentry_id)
@@ -105,7 +119,7 @@ class SetModelTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -181,7 +195,7 @@ class GetHistoryTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -296,7 +310,7 @@ class GetLogbookTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -407,7 +421,7 @@ class RenderTemplateTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -469,7 +483,7 @@ class InternetLookupTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -607,7 +621,7 @@ class GetStatisticsTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -681,7 +695,7 @@ class ListAutomationsTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -734,7 +748,7 @@ class ToggleAutomationTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -795,7 +809,7 @@ class AddAutomationTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -1084,7 +1098,7 @@ class ModifyDashboardTool(AiSubscriptionAssistTool):
 
         return "\n".join(parts)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -1363,7 +1377,7 @@ class CallServiceTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -1445,7 +1459,7 @@ class SendNotificationTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -1511,7 +1525,7 @@ class GetErrorLogTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -1557,7 +1571,7 @@ class WhoIsHomeTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -1625,7 +1639,7 @@ class ManageListTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -1726,7 +1740,7 @@ class GetCalendarEventsTool(AiSubscriptionAssistTool):
         """Initialize."""
         super().__init__(hass, entry, subentry_id)
 
-    async def async_call(
+    async def _async_call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,

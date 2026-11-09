@@ -1,5 +1,10 @@
 {
   "config": {
+    "abort": {
+      "reauth_not_supported": "Reauthentication is unavailable for this provider.",
+      "reauth_successful": "ChatGPT sign-in was renewed.",
+      "wrong_chatgpt_account": "Sign in with the same ChatGPT account used to set up this entry."
+    },
     "error": {
       "authentication_error": "Invalid authentication. Please re-authenticate.",
       "cannot_connect": "Failed to connect to the provider.",

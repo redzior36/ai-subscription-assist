@@ -25,6 +25,7 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     ConfigSubentryFlow,
     OptionsFlow,
+    SOURCE_REAUTH,
     SubentryFlowResult,
 )
 from homeassistant.const import (
@@ -47,6 +48,7 @@ from homeassistant.helpers.selector import (
 )
 from homeassistant.helpers.typing import VolDictType
 
+from . import _create_client, _extract_openai_codex_account_id, _openai_token_expiry
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_CHAT_MODEL,
@@ -98,7 +100,6 @@ from .const import (
     NON_ADAPTIVE_THINKING_MODELS,
     NON_THINKING_MODELS,
     OAUTH_AUTHORIZE_URL,
-    OAUTH_BETA_FLAGS,
     OAUTH_CLIENT_ID,
     OAUTH_REDIRECT_URI,
     OAUTH_SCOPES,
@@ -211,30 +212,6 @@ def _parse_oauth_redirect_input(raw_input: str) -> tuple[str | None, str | None]
 
     # Raw code only.
     return value, None
-
-
-def _extract_openai_codex_account_id(access_token: str) -> str | None:
-    """Extract ChatGPT account id from an OpenAI OAuth JWT."""
-    try:
-        parts = access_token.split(".")
-        if len(parts) != 3:
-            return None
-        payload_b64 = parts[1]
-        payload_b64 += "=" * (-len(payload_b64) % 4)
-        payload = json.loads(
-            base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8")
-        )
-        if not isinstance(payload, dict):
-            return None
-        auth = payload.get("https://api.openai.com/auth")
-        if not isinstance(auth, dict):
-            return None
-        account_id = auth.get("chatgpt_account_id")
-        if isinstance(account_id, str) and account_id:
-            return account_id
-    except Exception:
-        return None
-    return None
 
 
 def _is_gemini_cli_vpc_sc_affected(payload: Any) -> bool:
@@ -687,6 +664,12 @@ class AiSubscriptionAssistConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors or None,
         )
 
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
+        """Renew a ChatGPT sign-in in place."""
+        if entry_data.get(CONF_PROVIDER) == PROVIDER_OPENAI_CODEX:
+            return await self.async_step_openai_codex()
+        return self.async_abort(reason="reauth_not_supported")
+
     async def async_step_openai_codex(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -729,9 +712,8 @@ class AiSubscriptionAssistConfigFlow(ConfigFlow, domain=DOMAIN):
                     token_data = response.json()
                 except httpx.HTTPStatusError as err:
                     _LOGGER.error(
-                        "OpenAI token exchange failed: %s - %s",
+                        "OpenAI token exchange failed (HTTP %s)",
                         err.response.status_code,
-                        err.response.text,
                     )
                     errors["base"] = "token_exchange_failed"
                 except httpx.HTTPError as err:
@@ -742,32 +724,41 @@ class AiSubscriptionAssistConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = "unknown"
 
                 if not errors:
+                    if not isinstance(token_data, dict):
+                        token_data = {}
                     access_token = token_data.get("access_token")
                     refresh_token = token_data.get("refresh_token")
-                    expires_in = token_data.get("expires_in")
+                    expires_at = _openai_token_expiry(token_data)
                     if (
                         not isinstance(access_token, str)
                         or not access_token
                         or not isinstance(refresh_token, str)
                         or not refresh_token
-                        or not isinstance(expires_in, (int, float))
+                        or expires_at is None
                     ):
                         errors["base"] = "token_exchange_failed"
                     else:
-                        account_id = _extract_openai_codex_account_id(access_token)
+                        account_id = _extract_openai_codex_account_id(
+                            access_token, token_data.get("id_token")
+                        )
                         if not account_id:
                             errors["base"] = "token_exchange_failed"
                         else:
-                            expires_at = time.time() + float(expires_in)
+                            data = {
+                                CONF_PROVIDER: PROVIDER_OPENAI_CODEX,
+                                CONF_ACCESS_TOKEN: access_token,
+                                CONF_REFRESH_TOKEN: refresh_token,
+                                CONF_EXPIRES_AT: expires_at,
+                                CONF_OPENAI_CODEX_ACCOUNT_ID: account_id,
+                            }
+                            if self.source == SOURCE_REAUTH:
+                                entry = self._get_reauth_entry()
+                                if entry.data.get(CONF_OPENAI_CODEX_ACCOUNT_ID) not in (None, account_id):
+                                    return self.async_abort(reason="wrong_chatgpt_account")
+                                return self.async_update_reload_and_abort(entry, data_updates=data)
                             return self.async_create_entry(
                                 title=entry_title,
-                                data={
-                                    CONF_PROVIDER: PROVIDER_OPENAI_CODEX,
-                                    CONF_ACCESS_TOKEN: access_token,
-                                    CONF_REFRESH_TOKEN: refresh_token,
-                                    CONF_EXPIRES_AT: expires_at,
-                                    CONF_OPENAI_CODEX_ACCOUNT_ID: account_id,
-                                },
+                                data=data,
                                 subentries=[
                                     {
                                         "subentry_type": "conversation",
@@ -1289,21 +1280,22 @@ class ConversationSubentryFlowHandler(ConfigSubentryFlow):
         step_schema: VolDictType = {
             vol.Optional(
                 CONF_CHAT_MODEL,
-                default=DEFAULT[CONF_CHAT_MODEL],
+                default=_default_conversation_options(self._get_provider())[CONF_CHAT_MODEL],
             ): SelectSelector(
                 SelectSelectorConfig(
                     options=await self._get_model_list(), custom_value=True
                 )
             ),
-            vol.Optional(
-                CONF_MAX_TOKENS,
-                default=DEFAULT[CONF_MAX_TOKENS],
-            ): int,
-            vol.Optional(
-                CONF_TEMPERATURE,
-                default=DEFAULT[CONF_TEMPERATURE],
-            ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
         }
+        if self._get_provider() != PROVIDER_OPENAI_CODEX:
+            step_schema.update(
+                {
+                    vol.Optional(CONF_MAX_TOKENS, default=DEFAULT[CONF_MAX_TOKENS]): int,
+                    vol.Optional(
+                        CONF_TEMPERATURE, default=DEFAULT[CONF_TEMPERATURE]
+                    ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
+                }
+            )
 
         if user_input is not None:
             self.options.update(user_input)
@@ -1466,6 +1458,10 @@ class ConversationSubentryFlowHandler(ConfigSubentryFlow):
 
         if provider == PROVIDER_OPENAI_CODEX:
             return [
+                SelectOptionDict(label="GPT-6.1 Sol", value="gpt-6.1-sol"),
+                SelectOptionDict(label="GPT-6.1 Terra", value="gpt-6.1-terra"),
+                SelectOptionDict(label="GPT-6 Luna", value="gpt-6-luna"),
+                SelectOptionDict(label="GPT-6 Astra", value="gpt-6-astra"),
                 SelectOptionDict(label="GPT-5.3 Codex", value="gpt-5.3-codex"),
                 SelectOptionDict(label="GPT-5.2 Codex", value="gpt-5.2-codex"),
                 SelectOptionDict(label="GPT-5.1 Codex Max", value="gpt-5.1-codex-max"),
@@ -1519,15 +1515,7 @@ class ConversationSubentryFlowHandler(ConfigSubentryFlow):
             ]
 
         try:
-            client = anthropic.AsyncAnthropic(
-                auth_token=entry.data[CONF_ACCESS_TOKEN],
-                http_client=get_async_client(self.hass),
-                default_headers={
-                    "anthropic-beta": OAUTH_BETA_FLAGS,
-                    "user-agent": "claude-cli/2.1.2 (external, cli)",
-                    "x-app": "cli",
-                },
-            )
+            client = _create_client(self.hass, entry.data[CONF_ACCESS_TOKEN])
             models = await get_model_list(client)
             if models:
                 return models
@@ -1557,15 +1545,7 @@ class ConversationSubentryFlowHandler(ConfigSubentryFlow):
         zone_home = self.hass.states.get(ENTITY_ID_HOME)
         if zone_home is not None:
             entry = self._get_entry()
-            client = anthropic.AsyncAnthropic(
-                auth_token=entry.data[CONF_ACCESS_TOKEN],
-                http_client=get_async_client(self.hass),
-                default_headers={
-                    "anthropic-beta": OAUTH_BETA_FLAGS,
-                    "user-agent": "claude-cli/2.1.2 (external, cli)",
-                    "x-app": "cli",
-                },
-            )
+            client = _create_client(self.hass, entry.data[CONF_ACCESS_TOKEN])
             location_schema = vol.Schema(
                 {
                     vol.Optional(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import datetime
+import math
 import json
 import urllib.parse
 import time
@@ -14,7 +15,7 @@ import httpx
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_LLM_HASS_API, Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.httpx_client import get_async_client
@@ -214,16 +215,27 @@ def _decode_jwt_payload(token: str) -> dict[str, object] | None:
     return None
 
 
-def _extract_openai_codex_account_id(access_token: str) -> str | None:
-    payload = _decode_jwt_payload(access_token)
-    if not payload:
-        return None
-    auth = payload.get("https://api.openai.com/auth")
-    if not isinstance(auth, dict):
-        return None
-    account_id = auth.get("chatgpt_account_id")
-    if isinstance(account_id, str) and account_id:
-        return account_id
+def _extract_openai_codex_account_id(*tokens: object) -> str | None:
+    for token in tokens:
+        if isinstance(token, str) and (payload := _decode_jwt_payload(token)):
+            auth = payload.get("https://api.openai.com/auth")
+            if isinstance(auth, dict):
+                account_id = auth.get("chatgpt_account_id")
+                if isinstance(account_id, str) and account_id:
+                    return account_id
+    return None
+
+
+def _openai_token_expiry(token_data: dict) -> float | None:
+    """Use the access token's expiry when the response omits expires_in."""
+    expires_in = token_data.get("expires_in")
+    if type(expires_in) in (int, float) and math.isfinite(expires_in) and expires_in > 0:
+        return time.time() + expires_in
+    token = token_data.get("access_token")
+    if isinstance(token, str) and (claims := _decode_jwt_payload(token)):
+        expiry = claims.get("exp")
+        if type(expiry) in (int, float) and math.isfinite(expiry) and expiry > time.time():
+            return float(expiry)
     return None
 
 
@@ -252,39 +264,47 @@ async def _async_refresh_openai_codex_token(
         )
         response.raise_for_status()
         token_data = response.json()
-    except httpx.HTTPError as err:
+    except httpx.HTTPStatusError as err:
+        if err.response.status_code in (400, 401):
+            raise ConfigEntryAuthFailed("ChatGPT sign-in needs to be renewed") from err
+        LOGGER.error("OpenAI Codex token refresh returned HTTP %s", err.response.status_code)
+        return None
+    except (httpx.HTTPError, ValueError) as err:
         LOGGER.error("Failed to refresh OpenAI Codex token: %s", err)
         return None
 
+    if not isinstance(token_data, dict):
+        LOGGER.error("OpenAI token refresh returned an invalid response")
+        return None
     access_token = token_data.get("access_token")
-    refresh_token = token_data.get("refresh_token")
-    expires_in = token_data.get("expires_in")
+    refresh_token = token_data.get("refresh_token", refresh_token)
+    expires_at = _openai_token_expiry(token_data)
     if not isinstance(access_token, str) or not access_token:
         LOGGER.error("OpenAI token refresh response missing access_token")
         return None
     if not isinstance(refresh_token, str) or not refresh_token:
         LOGGER.error("OpenAI token refresh response missing refresh_token")
         return None
-    if not isinstance(expires_in, (int, float)):
-        LOGGER.error("OpenAI token refresh response missing expires_in")
+    if expires_at is None:
+        LOGGER.error("OpenAI token refresh response missing a valid expiry")
         return None
 
-    account_id = _extract_openai_codex_account_id(access_token)
-    if not account_id:
-        LOGGER.error("Failed to extract ChatGPT account id from refreshed token")
+    previous_account = entry.data.get(CONF_OPENAI_CODEX_ACCOUNT_ID)
+    account_id = _extract_openai_codex_account_id(
+        access_token, token_data.get("id_token")
+    ) or previous_account
+    if not account_id or (previous_account and previous_account != account_id):
+        LOGGER.error("OpenAI token refresh could not verify the configured ChatGPT account")
         return None
 
     new_data = {**entry.data}
     new_data[CONF_ACCESS_TOKEN] = access_token
     new_data[CONF_REFRESH_TOKEN] = refresh_token
-    new_data[CONF_EXPIRES_AT] = time.time() + float(expires_in)
+    new_data[CONF_EXPIRES_AT] = expires_at
     new_data[CONF_OPENAI_CODEX_ACCOUNT_ID] = account_id
 
     hass.config_entries.async_update_entry(entry, data=new_data)
-    LOGGER.debug(
-        "Successfully refreshed OpenAI Codex OAuth token, expires in %s seconds",
-        expires_in,
-    )
+    LOGGER.debug("Successfully refreshed OpenAI Codex OAuth token")
     return access_token
 
 
@@ -413,14 +433,12 @@ async def async_setup_entry(
         account_id = entry.data.get(CONF_OPENAI_CODEX_ACCOUNT_ID)
 
         if not access_token or not refresh_token:
-            LOGGER.error("Missing OpenAI Codex OAuth tokens in config entry")
-            return False
+            raise ConfigEntryAuthFailed("Missing ChatGPT OAuth tokens")
 
         if not account_id:
             account_id = _extract_openai_codex_account_id(str(access_token))
             if not account_id:
-                LOGGER.error("Missing OpenAI Codex account id in config entry")
-                return False
+                raise ConfigEntryAuthFailed("Missing ChatGPT account ID")
 
         # Refresh token if expired or close to expiry (within 10 minutes)
         if time.time() > (float(expires_at) - 600):
@@ -442,8 +460,7 @@ async def async_setup_entry(
             await client.async_validate()
         except httpx.HTTPStatusError as err:
             if err.response.status_code in (401, 403):
-                LOGGER.error("Invalid OpenAI Codex OAuth token: %s", err)
-                return False
+                raise ConfigEntryAuthFailed("ChatGPT sign-in needs to be renewed") from err
             raise ConfigEntryNotReady(err) from err
         except httpx.HTTPError as err:
             raise ConfigEntryNotReady(err) from err
@@ -570,7 +587,11 @@ async def async_setup_entry(
             if time.time() <= (expires_at - 600):
                 return
 
-            new_token = await _async_refresh_openai_codex_token(hass, entry)
+            try:
+                new_token = await _async_refresh_openai_codex_token(hass, entry)
+            except ConfigEntryAuthFailed:
+                entry.async_start_reauth(hass)
+                return
             if not new_token:
                 return
             account_id = entry.data.get(CONF_OPENAI_CODEX_ACCOUNT_ID)

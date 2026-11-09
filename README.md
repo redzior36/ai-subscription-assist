@@ -7,18 +7,16 @@ Use subscription-backed LLMs (OAuth) as **Home Assistant Assist conversation age
 - **OpenAI / compatible** via **API key** (metered)
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![GitHub Release](https://img.shields.io/github/v/release/FezVrasta/ai-subscription-assist)](https://github.com/FezVrasta/ai-subscription-assist/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/redzior36/ai-subscription-assist)](https://github.com/redzior36/ai-subscription-assist/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=FezVrasta&repository=ai-subscription-assist&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=redzior36&repository=ai-subscription-assist&category=integration)
 
 
 
-> **This is a fork** of [toml0006/claude-assist](https://github.com/toml0006/claude-assist)
-> by Jackson Tomlinson, adding a **speech-to-text platform** so the whole Assist
-> chain — microphone, transcription, and reply — runs on a Claude subscription.
-> See [What this fork adds](#what-this-fork-adds).
-
+> Based on [toml0006/claude-assist](https://github.com/toml0006/claude-assist)
+> and the compatibility and Claude STT changes in Jackson Tomlinson's
+> [FezVrasta fork](https://github.com/FezVrasta/ai-subscription-assist).
 
 ---
 
@@ -70,16 +68,45 @@ For subscription users, it authenticates using OAuth flows compatible with popul
 
 ## What this fork adds
 
+### ChatGPT Codex and voice on Home Assistant 2026.11
+
+The ChatGPT (Codex OAuth) agent uses the Codex Responses event stream and
+replays tool results inline. This release includes the Home Assistant
+Probatio/OpenAPI schema fix, the legacy OpenAPI dependency, and support for
+renewing ChatGPT sign-in from the existing config entry.
+
+GPT-6.1 Sol is the default for new Codex agents. GPT-6.1 Terra, GPT-6 Luna
+and GPT-6 Astra are available in the selector. Existing model choices are
+preserved. Model access depends on the ChatGPT account and workspace.
+
+Configure the three engines separately in **Settings → Voice assistants**.
+
+| Assist stage | Engine |
+| --- | --- |
+| Conversation | ChatGPT (Codex OAuth) from this integration |
+| Speech-to-text | Local Whisper, or **OpenAI speech-to-text** from this fork |
+| Text-to-speech | Local Piper, or the built-in Home Assistant OpenAI integration with an API key |
+
+**OpenAI speech-to-text** appears after adding a separate **OpenAI / compatible
+(API key)** entry with the default OpenAI URL. It uses `gpt-transcribe`,
+includes Polish, and sends the microphone recording to the metered
+[OpenAI Audio API](https://developers.openai.com/api/docs/guides/speech-to-text).
+
+The documented [Sign in with ChatGPT flow](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+excludes the transcription API. This fork uses Codex OAuth for text
+conversation only. For an Assist pipeline without an OpenAI API key, pair
+the ChatGPT agent with [Whisper and Piper](https://www.home-assistant.io/voice_control/voice_remote_local_assistant/).
+For cloud TTS, configure the [built-in OpenAI integration](https://www.home-assistant.io/integrations/openai_conversation/).
+
 ### Speech-to-text (`stt.claude_speech_to_text`)
 
 A Home Assistant speech-to-text entity backed by the same transcription service
 the Claude Code CLI uses for its `/voice` dictation. Select it as the
 speech-to-text engine of an Assist pipeline and pair it with a Claude
-conversation agent from this integration for a fully subscription-backed voice
-assistant, with no API key and no local Whisper model.
+conversation agent from this integration. Choose a separate text-to-speech
+engine for playback.
 
-- Only appears on **Claude subscription OAuth** entries. The service rejects
-  API-key authentication, so other providers do not get an STT entity.
+- Appears on **Claude subscription OAuth** entries.
 - Streams 16 kHz mono PCM, which is exactly what the Assist pipeline produces,
   so no transcoding happens.
 - Sends your Assist-exposed entity and area names as recognition hints, which
@@ -92,11 +119,8 @@ assistant, with no API key and no local Whisper model.
 > Anthropic's public API and is not documented. This integration speaks it the
 > way the Claude Code CLI does, using your subscription's OAuth token. It works
 > today, but Anthropic gates the service to their own clients, so it may change
-> or stop working without notice, and using it is your decision. There is no
-> officially supported alternative — the Claude API accepts no audio input at
-> all. If you would rather not rely on it, Home Assistant's built-in Whisper or
-> Speech-to-Phrase engines pair with this integration's conversation agent just
-> as well.
+> or stop working without notice. Home Assistant's Whisper and Speech-to-Phrase
+> engines can also be paired with this conversation agent.
 
 Two service behaviours worth knowing, both handled for you:
 
@@ -141,7 +165,9 @@ You can install via HACS (recommended) or manually.
 
 1. Home Assistant → **HACS**
 2. **⋮ → Custom repositories**
-3. Add `FezVrasta/ai-subscription-assist` as **Integration**
+3. Add `redzior36/ai-subscription-assist` as **Integration**.
+   For an upgrade from another fork, switch the HACS repository or replace
+   the integration files in place. Keep the existing Home Assistant integration entry.
 4. Install **AI Subscription Assist**
 5. Restart Home Assistant
 

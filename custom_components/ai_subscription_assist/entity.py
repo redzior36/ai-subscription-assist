@@ -18,8 +18,8 @@ except ImportError:
 from typing import Any
 
 import anthropic
-from anthropic import AsyncStream
 import httpx
+from anthropic import AsyncStream
 from anthropic.types import (
     Base64ImageSourceParam,
     Base64PDFSourceParam,
@@ -84,6 +84,7 @@ from homeassistant.helpers.json import json_dumps
 from homeassistant.util import slugify
 
 from . import AiSubscriptionAssistConfigEntry
+from .codex_stream import async_codex_response
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_CHAT_MODEL,
@@ -105,6 +106,7 @@ from .const import (
     DEFAULT_GEMINI_CLI_BASE_URL,
     DEFAULT_OPENAI_CHAT_MODEL,
     DEFAULT_OPENAI_CODEX_BASE_URL,
+    DEFAULT_OPENAI_CODEX_MODEL,
     DOMAIN,
     LOGGER,
     MIN_THINKING_BUDGET,
@@ -457,7 +459,6 @@ def _convert_content_openai_codex(
 ) -> list[dict[str, Any]]:
     """Transform HA chat_log content into OpenAI Responses API input format."""
     messages: list[dict[str, Any]] = []
-    msg_index = 0
 
     for content in chat_content:
         if isinstance(content, conversation.SystemContent):
@@ -484,7 +485,6 @@ def _convert_content_openai_codex(
 
         if isinstance(content, conversation.AssistantContent):
             if content.content:
-                msg_index += 1
                 messages.append(
                     {
                         "type": "message",
@@ -497,23 +497,15 @@ def _convert_content_openai_codex(
                             }
                         ],
                         "status": "completed",
-                        "id": f"msg_{msg_index}",
                     }
                 )
 
             if content.tool_calls:
                 for tool_call in content.tool_calls:
-                    call_id, item_id = (
-                        tool_call.id.split("|", 1)
-                        if "|" in tool_call.id
-                        else (tool_call.id, f"fc_{tool_call.id}")
-                    )
-                    if not item_id.startswith("fc"):
-                        item_id = f"fc_{item_id}"
+                    call_id = tool_call.id.split("|", 1)[0]
                     messages.append(
                         {
                             "type": "function_call",
-                            "id": item_id,
                             "call_id": call_id,
                             "name": tool_call.tool_name,
                             "arguments": json_dumps(tool_call.tool_args),
@@ -522,16 +514,13 @@ def _convert_content_openai_codex(
             continue
 
         if isinstance(content, conversation.ToolResultContent):
-            call_id = (
-                content.tool_call_id.split("|", 1)[0]
-                if "|" in content.tool_call_id
-                else content.tool_call_id
-            )
+            call_id = content.tool_call_id.split("|", 1)[0]
+            result = getattr(content, "result", None)
             messages.append(
                 {
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": json_dumps(content.tool_result),
+                    "output": json_dumps(result.data if result is not None else content.tool_result),
                 }
             )
             continue
@@ -1052,9 +1041,7 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
         if not isinstance(system, conversation.SystemContent):
             raise TypeError("First message must be a system message")
 
-        model = str(options.get(CONF_CHAT_MODEL, "gpt-5.2-codex"))
-        max_tokens = options.get(CONF_MAX_TOKENS, DEFAULT[CONF_MAX_TOKENS])
-        temperature = options.get(CONF_TEMPERATURE, DEFAULT[CONF_TEMPERATURE])
+        model = str(options.get(CONF_CHAT_MODEL, DEFAULT_OPENAI_CODEX_MODEL))
 
         tools: list[dict[str, Any]] = []
         if chat_log.llm_api:
@@ -1064,7 +1051,7 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
             ]
 
         output_tool: str | None = None
-        instructions = system.content
+        instructions = system.content or "You are a Home Assistant voice assistant."
         if structure and structure_name:
             output_tool = slugify(structure_name)
             tools.append(
@@ -1096,9 +1083,8 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
         headers = {
             "Authorization": f"Bearer {access_token}",
             "ChatGPT-Account-Id": str(account_id),
-            "OpenAI-Beta": "responses=experimental",
             "originator": "pi",
-            "Accept": "application/json",
+            "Accept": "text/event-stream",
             "Content-Type": "application/json",
             "User-Agent": "HomeAssistant",
         }
@@ -1109,32 +1095,14 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
             payload: dict[str, Any] = {
                 "model": model,
                 "store": False,
-                "stream": False,
+                "stream": True,
                 "instructions": instructions,
                 "input": input_messages,
-                "temperature": temperature,
+                "tools": tools,
                 "tool_choice": "auto",
                 "parallel_tool_calls": True,
-                "text": {"verbosity": "medium"},
             }
-            if max_tokens:
-                payload["max_output_tokens"] = max_tokens
-            if tools:
-                payload["tools"] = tools
-
-            try:
-                resp = await http_client.post(
-                    codex_url,
-                    headers=headers,
-                    json=payload,
-                )
-                resp.raise_for_status()
-            except httpx.HTTPError as err:
-                raise HomeAssistantError(
-                    f"Sorry, I had a problem talking to OpenAI Codex: {err}"
-                ) from err
-
-            data = resp.json()
+            data = await async_codex_response(http_client, codex_url, headers, payload)
             usage = data.get("usage")
             if isinstance(usage, dict):
                 chat_log.async_trace(
@@ -1182,12 +1150,8 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
                         continue
 
                     call_id = item.get("call_id")
-                    item_id = item.get("id")
                     if not isinstance(call_id, str) or not call_id:
                         continue
-                    if not isinstance(item_id, str) or not item_id:
-                        item_id = f"fc_{call_id}"
-                    tool_call_id = f"{call_id}|{item_id}"
 
                     try:
                         args = (
@@ -1202,9 +1166,11 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
                             f"Model returned invalid JSON arguments for tool {name}"
                         ) from err
 
+                    if not isinstance(args, dict):
+                        raise HomeAssistantError(f"Model returned non-object arguments for tool {name}")
                     tool_inputs.append(
                         llm.ToolInput(
-                            id=tool_call_id,
+                            id=call_id,
                             tool_name=name,
                             tool_args=args,
                             external=False,
@@ -1212,16 +1178,21 @@ class AiSubscriptionAssistBaseLLMEntity(Entity):
                     )
 
             assistant_text = "".join(assistant_parts) or None
+            if not assistant_text and not tool_inputs:
+                raise HomeAssistantError("OpenAI Codex completed without text or tool calls")
 
-            async def _delta_stream() -> AsyncGenerator[
+            async def _delta_stream(
+                text: str | None = assistant_text,
+                calls: list[llm.ToolInput] = tool_inputs,
+            ) -> AsyncGenerator[
                 conversation.AssistantContentDeltaDict
                 | conversation.ToolResultContentDeltaDict
             ]:
                 yield {"role": "assistant"}
-                if assistant_text:
-                    yield {"content": assistant_text}
-                if tool_inputs:
-                    yield {"tool_calls": tool_inputs}
+                if text:
+                    yield {"content": text}
+                if calls:
+                    yield {"tool_calls": calls}
 
             async for _content in chat_log.async_add_delta_content_stream(
                 self.entity_id, _delta_stream()

@@ -1,13 +1,13 @@
-"""Speech-to-text platform backed by Anthropic's voice stream service.
-
-Only available on Claude subscription OAuth entries: the dictation service
-rejects API-key authentication.
-"""
+"""Speech-to-text for Claude OAuth and OpenAI Audio API entries."""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterable
+import io
 import time
+import wave
+
+import httpx
 
 from homeassistant.components.stt import (
     AudioBitRates,
@@ -25,12 +25,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from . import OpenAIClient
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_EXPIRES_AT,
     CONF_PROVIDER,
+    DEFAULT_OPENAI_BASE_URL,
     LOGGER,
     PROVIDER_CLAUDE_OAUTH,
+    PROVIDER_OPENAI,
 )
 from .voice_stream import (
     SUPPORTED_LANGUAGES,
@@ -45,18 +48,28 @@ TOKEN_EXPIRY_MARGIN = 600
 # Cap on how many entity names are sent as recognition hints.
 MAX_KEYTERMS = 100
 
+# Maximum upload size, reserving space for the PCM WAV header.
+MAX_OPENAI_PCM_BYTES = 25_000_000 - 44
+OPENAI_LANGUAGES = (
+    "af ar hy az be bs bg ca zh hr cs da nl en et fi fr gl de el he hi hu is "
+    "id it ja kn kk ko lv lt mk ms mr mi ne no fa pl pt ro ru sr sk sl es sw "
+    "sv tl ta th tr uk ur vi cy"
+).split()
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up speech-to-text for a Claude subscription entry."""
-    if config_entry.data.get(CONF_PROVIDER) != PROVIDER_CLAUDE_OAUTH:
-        # Other providers have no equivalent transcription endpoint.
-        return
-
-    async_add_entities([ClaudeVoiceStreamEntity(config_entry)])
+    """Expose speech-to-text only on entries with an audio transport."""
+    provider = config_entry.data.get(CONF_PROVIDER, PROVIDER_CLAUDE_OAUTH)
+    if provider == PROVIDER_CLAUDE_OAUTH:
+        async_add_entities([ClaudeVoiceStreamEntity(config_entry)])
+    elif provider == PROVIDER_OPENAI:
+        client = config_entry.runtime_data
+        if isinstance(client, OpenAIClient) and client.base_url == DEFAULT_OPENAI_BASE_URL:
+            async_add_entities([OpenAITranscriptionEntity(config_entry)])
 
 
 def _exposed_entity_names(hass: HomeAssistant) -> list[str]:
@@ -94,21 +107,14 @@ def _exposed_entity_names(hass: HomeAssistant) -> list[str]:
     return names
 
 
-class ClaudeVoiceStreamEntity(SpeechToTextEntity):
-    """Transcribe Assist audio using the Claude subscription voice service."""
+class AssistPCMEntity(SpeechToTextEntity):
+    """Common format for Assist microphone audio."""
 
     _attr_has_entity_name = True
-    _attr_name = "Claude speech-to-text"
 
     def __init__(self, config_entry: ConfigEntry) -> None:
-        """Initialize."""
         self._config_entry = config_entry
         self._attr_unique_id = f"{config_entry.entry_id}_stt"
-
-    @property
-    def supported_languages(self) -> list[str]:
-        """Return the languages the dictation service accepts."""
-        return SUPPORTED_LANGUAGES
 
     @property
     def supported_formats(self) -> list[AudioFormats]:
@@ -134,6 +140,17 @@ class ClaudeVoiceStreamEntity(SpeechToTextEntity):
     def supported_channels(self) -> list[AudioChannels]:
         """Return supported channel counts."""
         return [AudioChannels.CHANNEL_MONO]
+
+
+class ClaudeVoiceStreamEntity(AssistPCMEntity):
+    """Transcribe Assist audio using the Claude subscription voice service."""
+
+    _attr_name = "Claude speech-to-text"
+
+    @property
+    def supported_languages(self) -> list[str]:
+        """Return the languages the dictation service accepts."""
+        return SUPPORTED_LANGUAGES
 
     async def _async_access_token(self) -> str | None:
         """Return a valid access token, refreshing it if it is near expiry."""
@@ -181,3 +198,58 @@ class ClaudeVoiceStreamEntity(SpeechToTextEntity):
             return SpeechResult(None, SpeechResultState.ERROR)
 
         return SpeechResult(text, SpeechResultState.SUCCESS)
+
+
+class OpenAITranscriptionEntity(AssistPCMEntity):
+    """Transcribe a completed recording with the OpenAI Audio API."""
+
+    _attr_name = "OpenAI speech-to-text"
+
+    @property
+    def supported_languages(self) -> list[str]:
+        """Return the selectable language hints for the Audio API."""
+        return OPENAI_LANGUAGES
+
+    async def async_process_audio_stream(
+        self, metadata: SpeechMetadata, stream: AsyncIterable[bytes]
+    ) -> SpeechResult:
+        """Wrap Assist's PCM bytes in a WAV file and send it for transcription."""
+        client: OpenAIClient = self._config_entry.runtime_data
+        audio = io.BytesIO()
+        with wave.open(audio, "wb") as wav:
+            wav.setnchannels(metadata.channel.value)
+            wav.setsampwidth(metadata.bit_rate.value // 8)
+            wav.setframerate(metadata.sample_rate.value)
+            size = 0
+            async for chunk in stream:
+                size += len(chunk)
+                if size > MAX_OPENAI_PCM_BYTES:
+                    LOGGER.error("Recording exceeds the OpenAI transcription size limit")
+                    return SpeechResult(None, SpeechResultState.ERROR)
+                wav.writeframesraw(chunk)
+
+        if not size or size % (metadata.bit_rate.value // 8):
+            return SpeechResult(None, SpeechResultState.ERROR)
+
+        language = metadata.language.replace("_", "-").split("-", 1)[0].lower()
+        try:
+            response = await client.http_client.post(
+                f"{client.base_url}/audio/transcriptions",
+                headers=client._headers(),
+                data={"model": "gpt-transcribe", "languages[]": language},
+                files={"file": ("assist.wav", audio.getvalue(), "audio/wav")},
+                timeout=60,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPStatusError as err:
+            LOGGER.error("OpenAI transcription returned HTTP %s", err.response.status_code)
+            return SpeechResult(None, SpeechResultState.ERROR)
+        except (httpx.HTTPError, ValueError) as err:
+            LOGGER.error("OpenAI transcription failed: %s", type(err).__name__)
+            return SpeechResult(None, SpeechResultState.ERROR)
+
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if isinstance(text, str) and (text := text.strip()):
+            return SpeechResult(text, SpeechResultState.SUCCESS)
+        return SpeechResult(None, SpeechResultState.ERROR)
